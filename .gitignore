@@ -1,0 +1,16 @@
+# .gitignore
+
+# ignore .env file
+.env
+
+# ignore virtual environment folder
+venv/
+
+# ignore pycache
+__pycache__/
+
+# ignore any local database files
+*.db
+
+# ignore log files
+*.log
