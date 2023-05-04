@@ -1,12 +1,16 @@
 import os
+
 import psycopg2
 import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
+from flask_cors import CORS
 import pandas as pd
+import json
+import re
 
 CREATE_USERS_TABLE = (
     "CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT, fullName TEXT, mobileNumber TEXT, photoUrl TEXT);"
@@ -63,6 +67,8 @@ connection = psycopg2.connect(url)
 # Initialize the Firebase app with service account credentials
 cred = credentials.Certificate("service_account.json")
 firebase_admin.initialize_app(cred)
+
+CORS(app)
 
 
 @app.route("/migrate_category", methods=['POST'])
@@ -288,6 +294,10 @@ def recommend_products(product_id):
     top_indices = similarity_scores.argsort()[::-1][:5]
     top_candidates = df_candidates.iloc[top_indices]
 
-    # Convert the top candidates to a JSON response and return it
-    response = top_candidates.to_json(orient='records')
-    return response
+    # Convert the top candidates to a dictionary with camelCase keys
+    camelcase_dict = [{re.sub(r'_([a-z])', lambda m: m.group(1).upper(), k): v for k, v in row.items()} for _, row in
+                      top_candidates.iterrows()]
+
+    # Convert the dictionary to a JSON response and return it
+    response = json.dumps(camelcase_dict)
+    return Response(response, mimetype='application/json')

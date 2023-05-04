@@ -5,3 +5,4 @@ firebase_admin
 pandas~=2.0.1
 sklearn~=0.0.post4
 scikit-learn~=1.2.2
+Flask-Cors
