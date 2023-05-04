@@ -36,11 +36,11 @@ CREATE_USER_SEARCH_HISTORY_TABLE = (
 """)
 
 INSERT_USER_SEARCH_HISTORY = (
-    "INSERT INTO user_search_history(user_id, search_query, created_at) VALUES(%s, %s, %s);"
+    "INSERT INTO user_search_history(user_id, search_query) VALUES(%s, %s);"
 )
 
 INSERT_USERS = (
-    "INSERT INTO users(id, email, fullName, mobileNumber, photoUrl) VALUES(%s, %s, %s, %s, %s);"
+    "INSERT INTO users(id, email, fullName, mobileNumber, photoUrl) VALUES(%s, %s, %s, COALESCE(%s, NULL), %s);"
 )
 
 INSERT_CATEGORY = (
@@ -110,16 +110,95 @@ def migrate_product():
             product['id'], product['categoryId'], product['name'], product['imageUrls'], product['price'],
             product['rating'], product['description'], product['colors']))
 
-    # Release the cursor and the connection back to the pool
+    # Commit the changes to the database
+    connection.commit()
+
+    # Close the database connection
     cur.close()
 
     return "Products migrated!"
+
+
+@app.route("/products")
+def get_all_products():
+    cur = connection.cursor()
+
+    # Execute the query to select all products
+    cur.execute("SELECT * FROM products")
+
+    # Fetch all the rows and convert to a list of dictionaries
+    rows = cur.fetchall()
+    print(rows)
+    products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+                     description=row[6], colors=row[7]) for row in rows]
+
+    # Close the cursor and the connection back to the pool
+    cur.close()
+
+    # Return the list of products as a JSON response
+    return jsonify(products)
+
+
+@app.route("/products/<category_id>")
+def get_product_by_category_id(category_id=None):
+    cur = connection.cursor()
+
+    # Check if a category_id is provided
+    if category_id:
+        # Execute the query to select products by category_id
+        cur.execute("SELECT * FROM products WHERE category_id = %s", (category_id,))
+    else:
+        # Execute the query to select all products
+        cur.execute("SELECT * FROM products")
+
+    # Fetch all the rows and convert to a list of dictionaries
+    rows = cur.fetchall()
+    print(rows)
+    products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+                     description=row[6], colors=row[7]) for row in rows]
+
+    # Close the cursor and the connection back to the pool
+    cur.close()
+
+    # Return the list of products as a JSON response
+    return jsonify(products)
+
+
+@app.route("/migrate_users")
+def migrate_users():
+    cur = connection.cursor()
+
+    # Create the necessary tables in the database if they don't already exist
+    cur.execute(CREATE_USERS_TABLE)
+
+    # Get the data from the Firebase collections
+    db = firestore.client()
+    users_ref = db.collection('users')
+
+    users = users_ref.get()
+
+    # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
+    for user in users:
+        user = user.to_dict()
+        cur.execute(INSERT_USERS,
+                    (user['id'], user['email'], user['fullName'], user.get('mobileNumber'), user['photoUrl']))
+
+    # Commit the changes to the database
+    connection.commit()
+
+    # Close the database connection
+    cur.close()
+
+    return "Users Migrated Successfully!"
 
 
 @app.route("/search_history", methods=["POST"])
 def save_search_history():
     # Get a connection from the connection pool and create a cursor
     cur = connection.cursor()
+
+    # # Create product table
+    cur.execute(CREATE_USER_SEARCH_HISTORY_TABLE)
 
     # Get the search query and user ID from the POST request
     search_query = request.form.get("search_query")
@@ -145,40 +224,40 @@ def search_products():
     cur = connection.cursor()
 
     # Get the search query and filter/sort parameters from the query string
-    query = request.args.get("q")
-    sort_by = request.args.get("sort_by", "rating")
-    order_by = request.args.get("order_by", "desc")
+    product_name = request.args.get("product_name")
     price_filter = request.args.get("price_filter")
+    filter_param = request.args.get("filter")
 
     # Construct the SQL query based on the parameters
     query_params = []
-    sql = "SELECT * FROM products WHERE name LIKE %s"
-    query_params.append(f"%{query}%")
+    sql = "SELECT * FROM products WHERE 1 = 1"
+    if product_name:
+        sql += " AND name ILIKE %s"
+        query_params.append(f"%{product_name}%")
     if price_filter:
         price_filter_parts = price_filter.split("-")
         min_price = price_filter_parts[0]
         max_price = price_filter_parts[1]
         sql += " AND price BETWEEN %s AND %s"
         query_params.extend([min_price, max_price])
-    if sort_by == "price":
-        sql += " ORDER BY price"
-    elif sort_by == "rating":
-        sql += " ORDER BY rating"
-    if order_by == "asc":
-        sql += " ASC"
-    else:
-        sql += " DESC"
+    if filter_param == "LowToHigh":
+        sql += " ORDER BY price ASC"
+    elif filter_param == "HighToLow":
+        sql += " ORDER BY price DESC"
+    elif filter_param == "Rating":
+        sql += " ORDER BY rating DESC"
 
     # Execute the SQL query and retrieve the results
     cur.execute(sql, query_params)
-    results = cur.fetchall()
+    rows = cur.fetchall()
 
     # Convert the results to a list of dictionaries and return as a JSON response
-    product_dicts = [dict(row) for row in results]
+    products = [
+        dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+             description=row[6], colors=row[7]) for row in rows]
 
     # Release the cursor and the connection back to the pool
     cur.close()
 
-    return jsonify(product_dicts)
-
+    return jsonify(products)
 
