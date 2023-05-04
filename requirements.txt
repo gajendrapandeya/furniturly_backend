@@ -1,4 +1,7 @@
-flask
-python-dotenv
+flask~=2.2.3
+python-dotenv~=1.0.0
 psycopg2-binary
 firebase_admin
+pandas~=2.0.1
+sklearn~=0.0.post4
+scikit-learn~=1.2.2

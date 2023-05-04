@@ -4,6 +4,9 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import pandas as pd
 
 CREATE_USERS_TABLE = (
     "CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT, fullName TEXT, mobileNumber TEXT, photoUrl TEXT);"
@@ -62,7 +65,7 @@ cred = credentials.Certificate("service_account.json")
 firebase_admin.initialize_app(cred)
 
 
-@app.route("/migrate_category")
+@app.route("/migrate_category", methods=['POST'])
 def migrate_category():
     cur = connection.cursor()
 
@@ -89,7 +92,7 @@ def migrate_category():
     return "Category Migrated Successfully!"
 
 
-@app.route("/migrate_product")
+@app.route("/migrate_product", methods=['POST'])
 def migrate_product():
     cur = connection.cursor()
 
@@ -164,7 +167,7 @@ def get_product_by_category_id(category_id=None):
     return jsonify(products)
 
 
-@app.route("/migrate_users")
+@app.route("/migrate_users", methods=['POST'])
 def migrate_users():
     cur = connection.cursor()
 
@@ -261,3 +264,30 @@ def search_products():
 
     return jsonify(products)
 
+
+@app.route('/recommend/<product_id>', methods=['GET'])
+def recommend_products(product_id):
+    # Load the data from the database into a Pandas DataFrame
+    df_products = pd.read_sql_query('SELECT * FROM products', connection)
+
+    # Retrieve the product with the given ID
+    product = df_products[df_products['id'] == product_id].iloc[0]
+
+    # Exclude the product from the list of candidates
+    df_candidates = df_products[df_products['id'] != product_id]
+
+    # Compute the TF-IDF vector for the product's name and description
+    tfidf_vectorizer = TfidfVectorizer()
+    tfidf_matrix = tfidf_vectorizer.fit_transform(df_candidates['name'] + ' ' + df_candidates['description'])
+
+    # Compute the cosine similarity between the product and the candidates
+    product_tfidf = tfidf_vectorizer.transform([product['name'] + ' ' + product['description']])
+    similarity_scores = cosine_similarity(product_tfidf, tfidf_matrix)[0]
+
+    # Sort the candidates by similarity score and return the top 5
+    top_indices = similarity_scores.argsort()[::-1][:5]
+    top_candidates = df_candidates.iloc[top_indices]
+
+    # Convert the top candidates to a JSON response and return it
+    response = top_candidates.to_json(orient='records')
+    return response
