@@ -298,6 +298,10 @@ def recommend_products(product_id):
     camelcase_dict = [{re.sub(r'_([a-z])', lambda m: m.group(1).upper(), k): v for k, v in row.items()} for _, row in
                       top_candidates.iterrows()]
 
+    # Convert the price to int before sending it back in the response
+    for item in camelcase_dict:
+        item['price'] = int(item['price'])
+
     # Convert the dictionary to a JSON response and return it
     response = json.dumps(camelcase_dict)
     return Response(response, mimetype='application/json')
