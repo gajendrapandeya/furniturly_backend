@@ -1,3 +1,4 @@
+import math
 import os
 
 import psycopg2
@@ -271,6 +272,48 @@ def search_products():
     return jsonify(products)
 
 
+# Recommendation Part
+def compute_tfidf_matrix(documents):
+    # Compute the term frequency (TF) matrix
+    tf_matrix = {}
+    for doc in documents:
+        for word in doc.split():
+            if word not in tf_matrix:
+                tf_matrix[word] = {}
+            if doc not in tf_matrix[word]:
+                tf_matrix[word][doc] = 0
+            tf_matrix[word][doc] += 1
+    for word in tf_matrix:
+        for doc in tf_matrix[word]:
+            tf_matrix[word][doc] /= len(documents)
+
+    # Compute the inverse document frequency (IDF) vector
+    idf_vector = {}
+    for doc in documents:
+        for word in set(doc.split()):
+            if word not in idf_vector:
+                idf_vector[word] = 0
+            idf_vector[word] += 1
+    for word in idf_vector:
+        idf_vector[word] = max(1, math.log(len(documents) / (idf_vector[word])))
+
+    # Compute the TF-IDF matrix
+    tfidf_matrix = {}
+    for doc in documents:
+        tfidf_matrix[doc] = {}
+        for word in set(doc.split()):
+            tfidf_matrix[doc][word] = tf_matrix[word][doc] * idf_vector[word]
+
+    return tfidf_matrix
+
+
+def compute_cosine_similarity(vec1, vec2):
+    dot_product = sum([vec1[word] * vec2.get(word, 0) for word in vec1])
+    magnitude1 = math.sqrt(sum([vec1[word] ** 2 for word in vec1]))
+    magnitude2 = math.sqrt(sum([vec2[word] ** 2 for word in vec2]))
+    return dot_product / (magnitude1 * magnitude2)
+
+
 @app.route('/recommend/<product_id>', methods=['GET'])
 def recommend_products(product_id):
     # Load the data from the database into a Pandas DataFrame
@@ -297,6 +340,43 @@ def recommend_products(product_id):
     # Convert the top candidates to a dictionary with camelCase keys
     camelcase_dict = [{re.sub(r'_([a-z])', lambda m: m.group(1).upper(), k): v for k, v in row.items()} for _, row in
                       top_candidates.iterrows()]
+
+    # Convert the price to int before sending it back in the response
+    for item in camelcase_dict:
+        item['price'] = int(item['price'])
+
+    # Convert the dictionary to a JSON response and return it
+    response = json.dumps(camelcase_dict)
+    return Response(response, mimetype='application/json')
+
+
+# Define a route to retrieve the top trending products
+@app.route('/trending-products', methods=['GET'])
+def get_trending_products():
+    # Load the data from the database into a Pandas DataFrame
+    df_products = pd.read_sql_query('SELECT * FROM products', connection)
+
+    # Compute the popularity of each product
+    # It computes the popularity of each product
+    # by grouping the products by their id column
+    # and counting the number of times each id appears in the DataFrame
+    # using the size() function. The resulting DataFrame with the popularity
+    # information is stored in a new variable called df_popularity.
+    df_popularity = df_products.groupby('id').size().reset_index(name='popularity')
+
+    # Join the popularity data with the product data
+    df_ranked_products = pd.merge(df_products, df_popularity, on='id', how='inner')
+
+    # Sort the products by popularity in descending order
+    df_ranked_products = df_ranked_products.sort_values(by=['popularity'], ascending=False)
+
+    # Drop the popularity column from the DataFrame
+    df_ranked_products = df_ranked_products.drop('popularity', axis=1)
+
+    # Convert the top 10 products to a dictionary with camelCase keys
+    top_products = df_ranked_products.head(5)
+    camelcase_dict = [{re.sub(r'_([a-z])', lambda m: m.group(1).upper(), k): v for k, v in row.items()} for _, row in
+                      top_products.iterrows()]
 
     # Convert the price to int before sending it back in the response
     for item in camelcase_dict:
