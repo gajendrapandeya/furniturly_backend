@@ -1,17 +1,19 @@
 import math
 import os
 
+import numpy as np
 import psycopg2
 import firebase_admin
 from firebase_admin import credentials, firestore
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from flask_cors import CORS
 import pandas as pd
 import json
 import re
+
+from sklearn.model_selection import train_test_split
+from sklearn.neighbors import NearestNeighbors
 
 CREATE_USERS_TABLE = (
     "CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, email TEXT, fullName TEXT, mobileNumber TEXT, photoUrl TEXT);"
@@ -115,7 +117,6 @@ def migrate_product():
     # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
     for product in products:
         product = product.to_dict()
-        print(product['categoryId'])
         cur.execute(INSERT_PRODUCT, (
             product['id'], product['categoryId'], product['name'], product['imageUrls'], product['price'],
             product['rating'], product['description'], product['colors']))
@@ -138,7 +139,6 @@ def get_all_products():
 
     # Fetch all the rows and convert to a list of dictionaries
     rows = cur.fetchall()
-    print(rows)
     products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
                      description=row[6], colors=row[7]) for row in rows]
 
@@ -163,7 +163,6 @@ def get_product_by_category_id(category_id=None):
 
     # Fetch all the rows and convert to a list of dictionaries
     rows = cur.fetchall()
-    print(rows)
     products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
                      description=row[6], colors=row[7]) for row in rows]
 
@@ -213,9 +212,6 @@ def save_search_history():
     # Get the search query and user ID from the POST request
     search_query = request.form.get("search_query")
     user_id = request.form.get("user_id")
-
-    print(search_query)
-    print(user_id)
 
     # Save the search history record to the database
     cur.execute(INSERT_USER_SEARCH_HISTORY, (user_id, search_query))
@@ -316,34 +312,46 @@ def compute_cosine_similarity(vec1, vec2):
 
 @app.route('/recommend/<product_id>', methods=['GET'])
 def recommend_products(product_id):
-    # Load the data from the database into a Pandas DataFrame
-    df_products = pd.read_sql_query('SELECT * FROM products', connection)
+    # Load the data from the database into a list of dictionaries
+    cursor = connection.cursor()
+    cursor.execute('SELECT * FROM products')
+    rows = cursor.fetchall()
+    products = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
 
     # Retrieve the product with the given ID
-    product = df_products[df_products['id'] == product_id].iloc[0]
+    product = next((p for p in products if p['id'] == product_id), None)
 
     # Exclude the product from the list of candidates
-    df_candidates = df_products[df_products['id'] != product_id]
+    candidates = [p for p in products if p['id'] != product_id]
 
-    # Compute the TF-IDF vector for the product's name and description
-    tfidf_vectorizer = TfidfVectorizer()
-    tfidf_matrix = tfidf_vectorizer.fit_transform(df_candidates['name'] + ' ' + df_candidates['description'])
+    # Compute the TF-IDF matrix for the candidates
+    documents = [p['name'] + ' ' + p['description'] for p in candidates]
+    tfidf_matrix = compute_tfidf_matrix(documents)
+
+    # Compute the TF-IDF vector for the product
+    product_doc = product['name'] + ' ' + product['description']
+    product_tfidf = compute_tfidf_matrix([product_doc])[product_doc]
 
     # Compute the cosine similarity between the product and the candidates
-    product_tfidf = tfidf_vectorizer.transform([product['name'] + ' ' + product['description']])
-    similarity_scores = cosine_similarity(product_tfidf, tfidf_matrix)[0]
+    similarity_scores = [(c, compute_cosine_similarity(product_tfidf, tfidf_matrix[c['name'] + ' ' + c['description']]))
+                         for c in candidates]
 
     # Sort the candidates by similarity score and return the top 5
-    top_indices = similarity_scores.argsort()[::-1][:5]
-    top_candidates = df_candidates.iloc[top_indices]
+    top_candidates = sorted(similarity_scores, key=lambda x: x[1], reverse=True)[:5]
 
     # Convert the top candidates to a dictionary with camelCase keys
-    camelcase_dict = [{re.sub(r'_([a-z])', lambda m: m.group(1).upper(), k): v for k, v in row.items()} for _, row in
-                      top_candidates.iterrows()]
+    camelcase_dict = []
+    for row in top_candidates:
+        # Convert the dictionary keys to camelCase
+        camelcase_row = {}
+        for key, value in row[0].items():
+            camelcase_key = re.sub(r'_([a-z])', lambda m: m.group(1).upper(), key)
+            camelcase_row[camelcase_key] = value
 
-    # Convert the price to int before sending it back in the response
-    for item in camelcase_dict:
-        item['price'] = int(item['price'])
+        # Convert the price to an integer
+        camelcase_row['price'] = int(camelcase_row['price'])
+
+        camelcase_dict.append(camelcase_row)
 
     # Convert the dictionary to a JSON response and return it
     response = json.dumps(camelcase_dict)
@@ -385,3 +393,54 @@ def get_trending_products():
     # Convert the dictionary to a JSON response and return it
     response = json.dumps(camelcase_dict)
     return Response(response, mimetype='application/json')
+
+
+# Recommendation analysis
+
+def evaluate_recommendation_model():
+    # Load the data from the database into a list of dictionaries
+    cursor = connection.cursor()
+    cursor.execute('SELECT * FROM products')
+    rows = cursor.fetchall()
+    products = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
+
+    # Split the data into train and validation sets
+    train_data, valid_data = train_test_split(products, test_size=0.2)
+
+    # Compute the TF-IDF matrix for the candidates in the training set
+    train_documents = [p['name'] + ' ' + p['description'] for p in train_data]
+    train_tfidf_matrix = compute_tfidf_matrix(train_documents)
+
+    # Train the recommendation model
+    model = NearestNeighbors(metric='cosine', algorithm='brute')
+    model.fit(train_tfidf_matrix)
+
+    # Evaluate the model on the validation set
+    valid_predictions = []
+    for product in valid_data:
+        product_tfidf = compute_tfidf_matrix([product['name'] + ' ' + product['description']])[
+            product['name'] + ' ' + product['description']]
+        product_tfidf = np.array(product_tfidf)  # convert to numpy array
+        if product_tfidf.size > 1:  # check if there is more than one element
+            product_tfidf = product_tfidf.reshape(1, None)
+        distances, indices = model.kneighbors(product_tfidf, n_neighbors=5)
+        neighbor_indices = indices[0]
+        neighbor_products = [train_data[i] for i in neighbor_indices]
+        valid_predictions.append([p['id'] for p in neighbor_products])
+
+    # Compute the accuracy of the model
+    num_correct = 0
+    for i in range(len(valid_data)):
+        product_id = valid_data[i]['id']
+        predicted_ids = valid_predictions[i]
+        if product_id in predicted_ids:
+            num_correct += 1
+    recommendation_accuracy = num_correct / len(valid_data)
+
+    return recommendation_accuracy
+
+
+if __name__ == '__main__':
+    # Print the accuracy of the recommendation system
+    accuracy = evaluate_recommendation_model()
+    print(f'Accuracy of the recommendation system: {accuracy:.2f}')
