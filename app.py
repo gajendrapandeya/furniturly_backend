@@ -59,15 +59,24 @@ INSERT_PRODUCT = (
     "INSERT INTO products(id, category_id, name, image_urls, price, rating, description, colors) VALUES(%s, %s, %s, %s, %s, %s, %s, %s);"
 )
 load_dotenv()
+# Global connection pool variable
+connection_pool = None
 
-app = Flask(__name__)
-CORS(app)
 
-# Database URL from environment
-url = os.getenv("DATABASE_URL")
+def create_app():
+    flask_app = Flask(__name__)
+    CORS(flask_app)
 
-# Initialize the connection pool
-connection_pool = psycopg2.pool.SimpleConnectionPool(1, 5, url)
+    # Initialize the connection pool here, ensuring it's done only once
+    global connection_pool
+    if connection_pool is None:
+        url = os.getenv("DATABASE_URL")
+        connection_pool = psycopg2.pool.SimpleConnectionPool(1, 5, url)
+
+    return flask_app
+
+
+app = create_app()
 
 # Initialize Firebase
 service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
