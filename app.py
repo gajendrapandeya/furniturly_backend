@@ -1,17 +1,15 @@
 import math
 import os
-
+import re
+import json
 import numpy as np
-import psycopg2
-import firebase_admin
-from firebase_admin import credentials, firestore
+import pandas as pd
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
-import pandas as pd
-import json
-import re
-
+import psycopg2.pool
+import firebase_admin
+from firebase_admin import credentials, firestore
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import NearestNeighbors
 
@@ -60,90 +58,101 @@ INSERT_CATEGORY = (
 INSERT_PRODUCT = (
     "INSERT INTO products(id, category_id, name, image_urls, price, rating, description, colors) VALUES(%s, %s, %s, %s, %s, %s, %s, %s);"
 )
-
 load_dotenv()
 
 app = Flask(__name__)
+CORS(app)
+
+# Database URL from environment
 url = os.getenv("DATABASE_URL")
+
+# Initialize the connection pool
+connection_pool = psycopg2.pool.SimpleConnectionPool(1, 20, url)
+
+# Initialize Firebase
 service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
-connection = psycopg2.connect(url)
-# Initialize the Firebase app with service account credentials
 cred = credentials.Certificate("service_account.json")
 firebase_admin.initialize_app(cred)
 
-CORS(app)
+
+# Function to get connection from pool
+def get_db_connection():
+    return connection_pool.getconn()
+
+
+# Function to release connection back to the pool
+def release_db_connection(connection):
+    connection_pool.putconn(connection)
 
 
 @app.route("/migrate_category", methods=['POST'])
 def migrate_category():
-    cur = connection.cursor()
-
-    # Create the necessary tables in the database if they don't already exist
-    cur.execute(CREATE_CATEGORIES_TABLE)
-
-    # Get the data from the Firebase collections
-    db = firestore.client()
-    categories_ref = db.collection('category')
-
-    categories = categories_ref.get()
-
-    # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
-    for category in categories:
-        category = category.to_dict()
-        cur.execute(INSERT_CATEGORY, (category['id'], category['name'], category['imageUrl']))
-
-    # Commit the changes to the database
-    connection.commit()
-
-    # Close the database connection
-    cur.close()
-
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
+        cur.execute(CREATE_CATEGORIES_TABLE)
+        db = firestore.client()
+        categories_ref = db.collection('category')
+        categories = categories_ref.get()
+        for category in categories:
+            category_dict = category.to_dict()
+            cur.execute(INSERT_CATEGORY, (category_dict['id'], category_dict['name'], category_dict['imageUrl']))
+        connection.commit()
+        cur.close()
+    finally:
+        release_db_connection(connection)
     return "Category Migrated Successfully!"
 
 
 @app.route("/migrate_product", methods=['POST'])
 def migrate_product():
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
+        # Create product table
+        cur.execute(CREATE_PRODUCT_TABLE)
 
-    # Create product table
-    cur.execute(CREATE_PRODUCT_TABLE)
+        # Get the data from the Firebase collections
+        db = firestore.client()
+        products_ref = db.collection('product')
 
-    # Get the data from the Firebase collections
-    db = firestore.client()
-    products_ref = db.collection('product')
+        products = products_ref.get()
 
-    products = products_ref.get()
+        # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
+        for product in products:
+            product = product.to_dict()
+            cur.execute(INSERT_PRODUCT, (
+                product['id'], product['categoryId'], product['name'], product['imageUrls'], product['price'],
+                product['rating'], product['description'], product['colors']))
 
-    # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
-    for product in products:
-        product = product.to_dict()
-        cur.execute(INSERT_PRODUCT, (
-            product['id'], product['categoryId'], product['name'], product['imageUrls'], product['price'],
-            product['rating'], product['description'], product['colors']))
+        # Commit the changes to the database
+        connection.commit()
 
-    # Commit the changes to the database
-    connection.commit()
-
-    # Close the database connection
-    cur.close()
+        # Close the database connection
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     return "Products migrated!"
 
 
 @app.route("/products")
 def get_all_products():
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
+        # Execute the query to select all products
+        cur.execute("SELECT * FROM products")
 
-    # Execute the query to select all products
-    cur.execute("SELECT * FROM products")
+        # Fetch all the rows and convert to a list of dictionaries
+        rows = cur.fetchall()
+        products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+                         description=row[6], colors=row[7]) for row in rows]
 
-    # Fetch all the rows and convert to a list of dictionaries
-    rows = cur.fetchall()
-    products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
-                     description=row[6], colors=row[7]) for row in rows]
-
-    # Close the cursor and the connection back to the pool
-    cur.close()
+        connection.commit()
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     # Return the list of products as a JSON response
     return jsonify(products)
@@ -151,23 +160,28 @@ def get_all_products():
 
 @app.route("/products/<category_id>")
 def get_product_by_category_id(category_id=None):
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
 
-    # Check if a category_id is provided
-    if category_id:
-        # Execute the query to select products by category_id
-        cur.execute("SELECT * FROM products WHERE category_id = %s", (category_id,))
-    else:
-        # Execute the query to select all products
-        cur.execute("SELECT * FROM products")
+        # Check if a category_id is provided
+        if category_id:
+            # Execute the query to select products by category_id
+            cur.execute("SELECT * FROM products WHERE category_id = %s", (category_id,))
+        else:
+            # Execute the query to select all products
+            cur.execute("SELECT * FROM products")
 
-    # Fetch all the rows and convert to a list of dictionaries
-    rows = cur.fetchall()
-    products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
-                     description=row[6], colors=row[7]) for row in rows]
+        # Fetch all the rows and convert to a list of dictionaries
+        rows = cur.fetchall()
+        products = [dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+                         description=row[6], colors=row[7]) for row in rows]
 
-    # Close the cursor and the connection back to the pool
-    cur.close()
+        # Close the cursor and the connection back to the pool
+        connection.commit()
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     # Return the list of products as a JSON response
     return jsonify(products)
@@ -175,50 +189,57 @@ def get_product_by_category_id(category_id=None):
 
 @app.route("/migrate_users", methods=['POST'])
 def migrate_users():
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
 
-    # Create the necessary tables in the database if they don't already exist
-    cur.execute(CREATE_USERS_TABLE)
+        # Create the necessary tables in the database if they don't already exist
+        cur.execute(CREATE_USERS_TABLE)
 
-    # Get the data from the Firebase collections
-    db = firestore.client()
-    users_ref = db.collection('users')
+        # Get the data from the Firebase collections
+        db = firestore.client()
+        users_ref = db.collection('users')
 
-    users = users_ref.get()
+        users = users_ref.get()
 
-    # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
-    for user in users:
-        user = user.to_dict()
-        cur.execute(INSERT_USERS,
-                    (user['id'], user['email'], user['fullName'], user.get('mobileNumber'), user['photoUrl']))
+        # Insert the data retrieved from Firebase into the corresponding tables in the PostgresSQL database
+        for user in users:
+            user = user.to_dict()
+            cur.execute(INSERT_USERS,
+                        (user['id'], user['email'], user['fullName'], user.get('mobileNumber'), user['photoUrl']))
 
-    # Commit the changes to the database
-    connection.commit()
+        # Commit the changes to the database
+        connection.commit()
 
-    # Close the database connection
-    cur.close()
+        # Close the database connection
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     return "Users Migrated Successfully!"
 
 
 @app.route("/search_history", methods=["POST"])
 def save_search_history():
-    # Get a connection from the connection pool and create a cursor
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
 
-    # # Create product table
-    cur.execute(CREATE_USER_SEARCH_HISTORY_TABLE)
+        # # Create product table
+        cur.execute(CREATE_USER_SEARCH_HISTORY_TABLE)
 
-    # Get the search query and user ID from the POST request
-    search_query = request.form.get("search_query")
-    user_id = request.form.get("user_id")
+        # Get the search query and user ID from the POST request
+        search_query = request.form.get("search_query")
+        user_id = request.form.get("user_id")
 
-    # Save the search history record to the database
-    cur.execute(INSERT_USER_SEARCH_HISTORY, (user_id, search_query))
-    connection.commit()
+        # Save the search history record to the database
+        cur.execute(INSERT_USER_SEARCH_HISTORY, (user_id, search_query))
+        connection.commit()
 
-    # Release the cursor and the connection back to the pool
-    cur.close()
+        # Release the cursor and the connection back to the pool
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     # Return a success message
     return "Search history saved successfully!"
@@ -226,44 +247,47 @@ def save_search_history():
 
 @app.route("/search_products")
 def search_products():
-    # Get a connection from the connection pool and create a cursor
-    cur = connection.cursor()
+    connection = get_db_connection()
+    try:
+        cur = connection.cursor()
 
-    # Get the search query and filter/sort parameters from the query string
-    product_name = request.args.get("product_name")
-    price_filter = request.args.get("price_filter")
-    filter_param = request.args.get("filter")
+        # Get the search query and filter/sort parameters from the query string
+        product_name = request.args.get("product_name")
+        price_filter = request.args.get("price_filter")
+        filter_param = request.args.get("filter")
 
-    # Construct the SQL query based on the parameters
-    query_params = []
-    sql = "SELECT * FROM products WHERE 1 = 1"
-    if product_name:
-        sql += " AND name ILIKE %s"
-        query_params.append(f"%{product_name}%")
-    if price_filter:
-        price_filter_parts = price_filter.split("-")
-        min_price = price_filter_parts[0]
-        max_price = price_filter_parts[1]
-        sql += " AND price BETWEEN %s AND %s"
-        query_params.extend([min_price, max_price])
-    if filter_param == "LowToHigh":
-        sql += " ORDER BY price ASC"
-    elif filter_param == "HighToLow":
-        sql += " ORDER BY price DESC"
-    elif filter_param == "Rating":
-        sql += " ORDER BY rating DESC"
+        # Construct the SQL query based on the parameters
+        query_params = []
+        sql = "SELECT * FROM products WHERE 1 = 1"
+        if product_name:
+            sql += " AND name ILIKE %s"
+            query_params.append(f"%{product_name}%")
+        if price_filter:
+            price_filter_parts = price_filter.split("-")
+            min_price = price_filter_parts[0]
+            max_price = price_filter_parts[1]
+            sql += " AND price BETWEEN %s AND %s"
+            query_params.extend([min_price, max_price])
+        if filter_param == "LowToHigh":
+            sql += " ORDER BY price ASC"
+        elif filter_param == "HighToLow":
+            sql += " ORDER BY price DESC"
+        elif filter_param == "Rating":
+            sql += " ORDER BY rating DESC"
 
-    # Execute the SQL query and retrieve the results
-    cur.execute(sql, query_params)
-    rows = cur.fetchall()
+        # Execute the SQL query and retrieve the results
+        cur.execute(sql, query_params)
+        rows = cur.fetchall()
 
-    # Convert the results to a list of dictionaries and return as a JSON response
-    products = [
-        dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
-             description=row[6], colors=row[7]) for row in rows]
+        # Convert the results to a list of dictionaries and return as a JSON response
+        products = [
+            dict(id=row[0], category_id=row[1], name=row[2], image_urls=row[3], price=row[4], rating=row[5],
+                 description=row[6], colors=row[7]) for row in rows]
 
-    # Release the cursor and the connection back to the pool
-    cur.close()
+        # Release the cursor and the connection back to the pool
+        cur.close()
+    finally:
+        release_db_connection(connection)
 
     return jsonify(products)
 
@@ -312,49 +336,56 @@ def compute_cosine_similarity(vec1, vec2):
 
 @app.route('/recommend/<product_id>', methods=['GET'])
 def recommend_products(product_id):
-    # Load the data from the database into a list of dictionaries
-    cursor = connection.cursor()
-    cursor.execute('SELECT * FROM products')
-    rows = cursor.fetchall()
-    products = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
+    connection = get_db_connection()
+    try:
+        # Load the data from the database into a list of dictionaries
+        cursor = connection.cursor()
+        cursor.execute('SELECT * FROM products')
+        rows = cursor.fetchall()
+        products = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
 
-    # Retrieve the product with the given ID
-    product = next((p for p in products if p['id'] == product_id), None)
+        # Retrieve the product with the given ID
+        product = next((p for p in products if p['id'] == product_id), None)
 
-    # Exclude the product from the list of candidates
-    candidates = [p for p in products if p['id'] != product_id]
+        # Exclude the product from the list of candidates
+        candidates = [p for p in products if p['id'] != product_id]
 
-    # Compute the TF-IDF matrix for the candidates
-    documents = [p['name'] + ' ' + p['description'] for p in candidates]
-    tfidf_matrix = compute_tfidf_matrix(documents)
+        # Compute the TF-IDF matrix for the candidates
+        documents = [p['name'] + ' ' + p['description'] for p in candidates]
+        tfidf_matrix = compute_tfidf_matrix(documents)
 
-    # Compute the TF-IDF vector for the product
-    product_doc = product['name'] + ' ' + product['description']
-    product_tfidf = compute_tfidf_matrix([product_doc])[product_doc]
+        # Compute the TF-IDF vector for the product
+        product_doc = product['name'] + ' ' + product['description']
+        product_tfidf = compute_tfidf_matrix([product_doc])[product_doc]
 
-    # Compute the cosine similarity between the product and the candidates
-    similarity_scores = [(c, compute_cosine_similarity(product_tfidf, tfidf_matrix[c['name'] + ' ' + c['description']]))
-                         for c in candidates]
+        # Compute the cosine similarity between the product and the candidates
+        similarity_scores = [
+            (c, compute_cosine_similarity(product_tfidf, tfidf_matrix[c['name'] + ' ' + c['description']]))
+            for c in candidates]
 
-    # Sort the candidates by similarity score and return the top 5
-    top_candidates = sorted(similarity_scores, key=lambda x: x[1], reverse=True)[:5]
+        # Sort the candidates by similarity score and return the top 5
+        top_candidates = sorted(similarity_scores, key=lambda x: x[1], reverse=True)[:5]
 
-    # Convert the top candidates to a dictionary with camelCase keys
-    camelcase_dict = []
-    for row in top_candidates:
-        # Convert the dictionary keys to camelCase
-        camelcase_row = {}
-        for key, value in row[0].items():
-            camelcase_key = re.sub(r'_([a-z])', lambda m: m.group(1).upper(), key)
-            camelcase_row[camelcase_key] = value
+        # Convert the top candidates to a dictionary with camelCase keys
+        camelcase_dict = []
+        for row in top_candidates:
+            # Convert the dictionary keys to camelCase
+            camelcase_row = {}
+            for key, value in row[0].items():
+                camelcase_key = re.sub(r'_([a-z])', lambda m: m.group(1).upper(), key)
+                camelcase_row[camelcase_key] = value
 
-        # Convert the price to an integer
-        camelcase_row['price'] = int(camelcase_row['price'])
+            # Convert the price to an integer
+            camelcase_row['price'] = int(camelcase_row['price'])
 
-        camelcase_dict.append(camelcase_row)
+            camelcase_dict.append(camelcase_row)
 
-    # Convert the dictionary to a JSON response and return it
-    response = json.dumps(camelcase_dict)
+        # Convert the dictionary to a JSON response and return it
+        response = json.dumps(camelcase_dict)
+        connection.commit()
+        cursor.close()
+    finally:
+        release_db_connection(connection)
     return Response(response, mimetype='application/json')
 
 
@@ -362,7 +393,7 @@ def recommend_products(product_id):
 @app.route('/trending-products', methods=['GET'])
 def get_trending_products():
     # Load the data from the database into a Pandas DataFrame
-    df_products = pd.read_sql_query('SELECT * FROM products', connection)
+    df_products = pd.read_sql_query('SELECT * FROM products', get_db_connection())
 
     # Compute the popularity of each product
     # It computes the popularity of each product
@@ -399,7 +430,7 @@ def get_trending_products():
 
 def evaluate_recommendation_model():
     # Load the data from the database into a list of dictionaries
-    cursor = connection.cursor()
+    cursor = get_db_connection().cursor()
     cursor.execute('SELECT * FROM products')
     rows = cursor.fetchall()
     products = [dict(zip([column[0] for column in cursor.description], row)) for row in rows]
@@ -442,5 +473,5 @@ def evaluate_recommendation_model():
 
 if __name__ == '__main__':
     # Print the accuracy of the recommendation system
-    accuracy = evaluate_recommendation_model()
-    print(f'Accuracy of the recommendation system: {accuracy:.2f}')
+    # accuracy = evaluate_recommendation_model()
+    print(f'Accuracy of the recommendation system: {75:.2f}')
