@@ -67,7 +67,7 @@ CORS(app)
 url = os.getenv("DATABASE_URL")
 
 # Initialize the connection pool
-connection_pool = psycopg2.pool.SimpleConnectionPool(1, 20, url)
+connection_pool = psycopg2.pool.SimpleConnectionPool(1, 5, url)
 
 # Initialize Firebase
 service_account = os.getenv("FIREBASE_SERVICE_ACCOUNT")
