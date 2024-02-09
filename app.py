@@ -481,6 +481,4 @@ def evaluate_recommendation_model():
 
 
 if __name__ == '__main__':
-    # Print the accuracy of the recommendation system
-    # accuracy = evaluate_recommendation_model()
-    print(f'Accuracy of the recommendation system: {75:.2f}')
+    app.run(host='0.0.0.0', debug=True, port=os.getenv("PORT"))
