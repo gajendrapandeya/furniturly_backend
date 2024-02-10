@@ -467,5 +467,4 @@ def evaluate_recommendation_model():
     return recommendation_accuracy
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=True, port=os.getenv("PORT"))
+
